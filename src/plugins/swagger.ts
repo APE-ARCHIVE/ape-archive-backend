@@ -15,6 +15,12 @@ export const swaggerPlugin = swagger({
           bearerFormat: "JWT",
           description:
             "Enter your JWT token (access token from Google OAuth callback)",
+    provider: 'scalar',
+    documentation: {
+        info: {
+            title: "ElysiaJS API",
+            version: "1.0.0",
+            description: "API Documentation for ElysiaJS Sample Project",
         },
       },
     },
@@ -24,4 +30,7 @@ export const swaggerPlugin = swagger({
       },
     ],
   },
+    scalarConfig: {
+        theme: 'mars',
+    }
 });
