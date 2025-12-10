@@ -77,8 +77,15 @@ class TagService {
       });
 
       const grouped: GroupedTags = {};
+      const seen = new Set<string>(); // composite key: "group:name"
+
       for (const tag of tags) {
         const groupName = tag.group || "Other";
+        const compositeKey = `${groupName}:${tag.name.toLowerCase()}`; // Case insensitive dedup
+
+        if (seen.has(compositeKey)) continue;
+        seen.add(compositeKey);
+
         if (!grouped[groupName]) {
           grouped[groupName] = [];
         }

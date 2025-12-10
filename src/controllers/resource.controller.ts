@@ -17,6 +17,8 @@ export const resourceController = new Elysia()
         limit: query.limit ? Number(query.limit) : 10,
         search: query.search,
         tagId: query.tagId,
+        tagName: query.tagName,
+        tagNames: query.tagNames,
         status: query.status as ResourceStatus,
       });
       return successResponse(resources, "Resources fetched successfully");
@@ -27,6 +29,8 @@ export const resourceController = new Elysia()
         limit: t.Optional(t.String()),
         search: t.Optional(t.String()),
         tagId: t.Optional(t.String()),
+        tagName: t.Optional(t.String()), 
+        tagNames: t.Optional(t.String({ description: "Comma-separated tag names for AND logic" })), 
         status: t.Optional(t.Enum(ResourceStatus)),
       }),
       detail: {
