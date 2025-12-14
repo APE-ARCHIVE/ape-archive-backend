@@ -157,7 +157,6 @@ class DriveMigrator {
   // --- Context Logic (The Brain) ---
   private async deriveFolderContext(folderName: string, parentContext: HierarchyContext): Promise<HierarchyContext> {
       const cleanName = folderName.trim();
-      // Clone and init arrays if missing (safe clone)
       const newContext: HierarchyContext = { 
           ...parentContext,
           flexibleTags: [...(parentContext.flexibleTags || [])],
@@ -166,14 +165,12 @@ class DriveMigrator {
       
       // 1. Check Root Level Switch
       if (!parentContext.levelName && !parentContext.isFlexibleRoot) {
-          // Explicit Mapping for Legacy Names
           let canonicalLevel = null;
           if (/^6\s*-\s*9\s*Class\s*Subjects/i.test(cleanName)) canonicalLevel = "Secondary";
           else if (/^Primary\s*Class\s*Subjects/i.test(cleanName)) canonicalLevel = "Primary";
           else if (/^A\/L\s*Subjects/i.test(cleanName)) canonicalLevel = "A/L";
           else if (/^O\/L\s*Subjects/i.test(cleanName)) canonicalLevel = "O/L";
           else {
-              // DB Check
               const rootTag = await prisma.tag.findFirst({
                  where: { name: { equals: cleanName, mode: 'insensitive' }, parentId: null, group: "LEVEL" } 
               });
@@ -200,11 +197,8 @@ class DriveMigrator {
           if (/attribute/i.test(cleanName)) return newContext; 
           
           const { categorizeFolder } = await import("../utils/tag-patterns");
-          // Check if Attribute Folder
           const extraTags = await this.extractFileAttributes(cleanName);
           if (extraTags.length > 0) {
-              // It is an attribute folder (or contains attributes).
-              // We should flatten it but KEEP the tags.
               newContext.inheritedTags!.push(...extraTags);
               return newContext; 
           }
@@ -217,25 +211,36 @@ class DriveMigrator {
       }
 
       // 3. Strict School Mode
-      // A. Is it a Grade?
       if (/Grade \d+/i.test(cleanName)) {
            newContext.gradeName = cleanName;
            return newContext;
       }
 
       // B. Is it a Stream?
-      if (/Stream/i.test(cleanName) || ["Science", "Maths", "Arts", "Commerce", "Bio", "Combined Maths", "Tech"].some(k => cleanName.toLowerCase().includes(k.toLowerCase()))) {
-          newContext.streamName = cleanName;
-          return newContext;
+      // Prevent identifying "Political Science" or "Agricultural Science" as "Science Stream"
+      // Also, if we are ALREADY inside a stream (parent has streamName), don't switch streams for nested folders.
+      if (!parentContext.streamName) {
+         // Rule 1: Explicit "Stream" Suffix (e.g. "Technology Stream", "Art Stream")
+         if (/Stream$/i.test(cleanName)) {
+             newContext.streamName = cleanName;
+             return newContext;
+         }
+
+         const cleanLower = cleanName.toLowerCase();
+         // Explicit exclusions for subjects that contain stream keywords
+         const isExcluded = ["political", "agricultural", "computer", "social", "home"].some(k => cleanLower.includes(k));
+         
+         if (!isExcluded) {
+             const keywords = ["stream", "science", "maths", "arts", "commerce", "bio", "tech"];
+             if (keywords.some(k => cleanLower.includes(k))) {
+                 newContext.streamName = cleanName;
+                 return newContext;
+             }
+         }
       }
 
-      // C. Check Fallback / Attributes
-      // We check if this folder name resolves to any Attribute Tags.
       const extraTags = await this.extractFileAttributes(cleanName);
-      
       if (extraTags.length > 0) {
-          // It IS an attribute folder (e.g. "English Medium" -> [TagID])
-          // We add it to context, and skip strict path building.
           log.info(`   [CTX] Folder is Attribute: ${cleanName} -> Inheriting Tags`);
           newContext.inheritedTags!.push(...extraTags);
           return newContext;
@@ -244,19 +249,67 @@ class DriveMigrator {
       const { categorizeFolder } = await import("../utils/tag-patterns");
       const match = categorizeFolder(cleanName);
       if (match && !match.isHierarchy) {
-           log.info(`   [CTX] Ignoring Attribute Folder (Matched Pattern but no Tag Created?): ${cleanName}`);
+           log.info(`   [CTX] Ignoring Attribute Folder: ${cleanName}`);
            return newContext;
       }
 
       // D. Subject OR Lesson logic
       if (parentContext.subject) {
-          // IF we already have a subject, this MUST be a Lesson (Unit)
           log.info(`   [CTX] Recognized Lesson/Unit: ${cleanName} (Parent Subject: ${parentContext.subject.name})`);
           newContext.lessonName = cleanName;
       } else {
-          // Else it is a Subject
-          log.info(`   [CTX] Recognized Subject: ${cleanName} (Parent: ${parentContext.gradeName || parentContext.streamName || parentContext.levelName || 'ROOT'})`);
-          newContext.subject = { id: "TEMP", name: cleanName }; 
+          // Guard: Prevent "Unit X" folders from acting as Subjects
+          if (/^(Unit|Lesson|Chapter|Term)\s*\d+/i.test(cleanName)) {
+              log.info(`   [CTX] Recognized Orphaned Lesson/Unit: ${cleanName} -> Treating as Content, not Subject`);
+              // We treat it as if we found a lesson, but we have NO subject.
+              // To prevent error, we can just NOT set subject. 
+              // migrateFile will complain if it needs a subject?
+              // No, migrateFile will just skip "Subject" tag and add "Lesson" tag if lessonName is set?
+              // But ensureTag("Unit 01", "LESSON", parentId) needs a parentId!
+              // If we have no subject, parentId is "Grade".
+              // Does User allow Lesson directly under Grade? "No mixed folders".
+              // So we should probably skip creating a folder tag for this, or assign to "General"?
+              // Let's set lessonName, and let migrateFile handle it.
+              newContext.lessonName = cleanName;
+          } else {
+              // It is likely a Subject.
+              // STREAM INFERENCE (A/L Specific)
+              // If we are in A/L, and we have NO stream, try to guess the stream from the subject name.
+              
+              const isAL = newContext.levelName === "A/L" || (newContext.gradeName && ["12", "13"].some(g => newContext.gradeName!.includes(g)));
+              
+              if (isAL && !newContext.streamName) {
+                  const SUBJECT_TO_STREAM: Record<string, string> = {
+                      "Biology": "Science Stream",
+                      "Physics": "Science Stream",
+                      "Chemistry": "Science Stream",
+                      "Combined Maths": "Science Stream",
+                      "Agricultural": "Science Stream", 
+                      "Information and Communication Technology": "Technology Stream",
+                      "ICT": "Technology Stream",
+                      "General English": "Common", 
+                      "GIT": "Common",
+                      "Political Science": "Art Stream",
+                      "Logic": "Art Stream",
+                      "History": "Art Stream",
+                      "Economics": "Commerce Stream",
+                      "Business": "Commerce Stream",
+                      "Accounting": "Commerce Stream",
+                      "Commerce": "Commerce Stream"
+                  };
+                  
+                  for (const [key, stream] of Object.entries(SUBJECT_TO_STREAM)) {
+                      if (cleanName.toLowerCase().includes(key.toLowerCase())) {
+                           newContext.streamName = stream;
+                           log.info(`   [CTX] Inferred Stream: ${stream} for Subject: ${cleanName}`);
+                           break;
+                      }
+                  }
+              }
+
+              log.info(`   [CTX] Recognized Subject: ${cleanName} (Parent: ${newContext.streamName || newContext.gradeName || 'ROOT'})`);
+              newContext.subject = { id: "TEMP", name: cleanName }; 
+          }
       }
       return newContext;
   }
@@ -278,6 +331,7 @@ class DriveMigrator {
       if (context.gradeName) pathParts.push(context.gradeName);
       if (context.streamName) pathParts.push(context.streamName);
       if (context.subject) pathParts.push(context.subject.name);
+      if (context.lessonName) pathParts.push(context.lessonName); // Ensure Unit folder is created
 
       if (pathParts.length === 0) return UPLOAD_FOLDER_ID!;
 
@@ -387,7 +441,7 @@ class DriveMigrator {
               if (!/attribute/i.test(context.subject.name)) {
                   const subjectTag = await this.ensureTag(context.subject.name, "SUBJECT", parentForSubject);
                   finalTagIds.push(subjectTag.id);
-                  // parentForSubject = subjectTag.id; 
+                  parentForSubject = subjectTag.id; 
               }
           }
           // E. Lesson / Unit

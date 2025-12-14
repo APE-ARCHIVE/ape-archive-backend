@@ -267,40 +267,66 @@ class LibraryService {
     }
 
     // 2. Fetch Children (Hierarchy Folders)
+    // 2. Fetch Children (Hierarchy Folders)
+    const childTagQuery: any = {
+        parentId: currentParentId,
+        source: "SYSTEM"
+    };
+
+    // FIX: If at Root (no parent), ONLY show LEVEL tags.
+    // This hides Attributes (Medium, Year) from appearing as Folders.
+    if (!currentParentId) {
+        childTagQuery.group = "LEVEL";
+    }
+
     const childTags = await prisma.tag.findMany({
-        where: {
-            parentId: currentParentId,
-            source: "SYSTEM"
-        },
+        where: childTagQuery,
         orderBy: { name: 'asc' }
     });
 
     // 3. Fetch Files (Resources) at this level
     // Logic: Get ALL resources tagged with currentParentId.
-    // Optimization: If we have child folders, we normally hide files that are inside those children.
     
     const childTagIds = new Set(childTags.map(t => t.id));
-    
-    // Fetch a subset of resources to determine available facets
-    // If we are at Root (currentParentId is null), likely minimal resources, but let's be safe.
-    // If currentParentId exists, we can fetch all Approved System resources.
     
     const resourceQuery: any = {
         source: "SYSTEM",
         status: "APPROVED"
     };
+
+    const andConditions: any[] = [];
     
     if (currentParentId) {
-        resourceQuery.tags = { some: { id: currentParentId } };
-    } else {
-        // At root, maybe restricts to only resources with NO hierarchy tags? 
-        // Or just don't return facets at root to avoid scanning DB.
+        // Must belong to the current folder
+        andConditions.push({ tags: { some: { id: currentParentId } } });
+    }
+
+    // Apply Attribute Filters (Remaining Candidate Tags)
+    // Any tag name provided in filters that wasn't consumed by hierarchy traversal
+    if (candidateTags.size > 0) {
+        const remaining = Array.from(candidateTags);
+        log.info(`Applying Filter Attributes: ${remaining.join(", ")}`);
+        
+        remaining.forEach(term => {
+            andConditions.push({
+                tags: { some: { 
+                    OR: [
+                        { name: { equals: term, mode: 'insensitive' } },
+                        { slug: { equals: term, mode: 'insensitive' } }
+                    ]
+                }}
+            });
+        });
+    }
+
+    if (andConditions.length > 0) {
+        resourceQuery.AND = andConditions;
     }
 
     const resources = await prisma.resource.findMany({
         where: resourceQuery,
         include: { tags: true },
-        take: 500 // Limit for performance, but enough to get facets
+        take: 500 // Limit for performance
     });
 
     // 4. Separate Loose Files vs Files in Subfolders

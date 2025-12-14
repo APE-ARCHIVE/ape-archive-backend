@@ -37,7 +37,7 @@ const HIERARCHY_SKELETON = [
                     { name: "Arts Stream" },
                     { name: "Commerce Stream" },
                     { name: "Technology Stream" },
-                    { name: "Common Stream" } // English, GIT
+                    { name: "Common" } // English, GIT
                 ]
             },
             {
@@ -94,9 +94,9 @@ const HIERARCHY_SKELETON = [
         ]
     },
     // F. Custom Roots (Flexible)
-    { name: "IELTS", children: [] },
-    { name: "Korean", children: [] },
-    { name: "English", children: [] } // General English
+    // { name: "IELTS", children: [] },  // Hidden for now (Empty)
+    // { name: "Korean", children: [] }, // Hidden for now (Empty)
+    // { name: "English", children: [] } // General English
 ];
 
 async function ensureTag(name: string, group: string, parentId: string | null, source: "SYSTEM" | "USER" = "SYSTEM") {
