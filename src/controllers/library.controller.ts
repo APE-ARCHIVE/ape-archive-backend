@@ -4,31 +4,17 @@ import { successResponse, errorResponse } from "../utils/response";
 import { AppError } from "../utils/error";
 import { log } from "../utils/logger";
 
+// Define Recursive Schema for Hierarchy
+const HierarchyNode = t.Recursive(Self => t.Object({
+  id: t.String(),
+  name: t.String(),
+  slug: t.String(),
+  group: t.Nullable(t.String()),
+  children: t.Array(Self)
+}));
+
 export const libraryController = new Elysia()
-  .get(
-    "/",
-    async ({ set }) => {
-      try {
-        const hierarchy = await libraryService.getLibraryHierarchy();
-        return successResponse(hierarchy, "Library hierarchy retrieved");
-      } catch (error) {
-        if (error instanceof AppError) {
-          set.status = error.statusCode;
-          return errorResponse(error.message, error.statusCode);
-        }
-        set.status = 500;
-        return errorResponse("Failed to fetch library", 500);
-      }
-    },
-    {
-      detail: {
-        summary: "Get Full Library Hierarchy",
-        description:
-          "Get the complete library folder structure with all SYSTEM resources organized by tags.",
-        tags: ["Library"],
-      },
-    }
-  )
+
   .get(
     "/browse",
     async ({ query, set }) => {

@@ -68,9 +68,10 @@ class LibraryService {
           const parent = tagMap.get(tag.parentId);
           parent.children.push(node);
         } else {
-          // If no parent (or parent not found/system), it's a root
-          // Specifically for our Level structure, Levels have no parent.
-          roots.push(node);
+          // Only add valid Hierarchy Roots (LEVELs) to the top of the tree response
+          if (tag.group === "LEVEL") {
+            roots.push(node);
+          }
         }
       });
 
@@ -194,79 +195,171 @@ class LibraryService {
         "LEVEL": "LEVEL"
     };
 
+    // 1. Determine Current Context (Drill Down) - Flexible Path Resolution
+    // Instead of enforcing a strict Group Order, we greedily follow the chain.
+    // This supports both "Grade -> Subject" and "Subject -> Grade" folder structures.
+
     let currentParentId: string | null = null;
     let currentLevelName = "Library";
     
-    const HIERARCHY_ORDER = ["LESSON", "RESOURCE_TYPE", "MEDIUM", "GRADE", "SUBJECT", "STREAM", "LEVEL"];
-    
-    for (const group of HIERARCHY_ORDER) {
-        // Find key in filters that maps to this group
-        const filterKey = Object.keys(filters).find(k => {
-             const upper = k.toUpperCase();
-             return (GROUP_MAPPING[upper] || upper) === group;
+    // Convert filters to a consumable set of { slug/name } candidates
+    // We ignore empty values and keys that aren't mapped
+    const candidateTags = new Set<string>();
+    Object.keys(filters).forEach(key => {
+        if (filters[key]) candidateTags.add(filters[key].toLowerCase());
+    });
+
+    // Max depth to prevent infinite loops (though unlikely with finite inputs)
+    let depth = 0;
+    while (candidateTags.size > 0 && depth < 10) {
+        depth++;
+        
+        // Find ANY tag that:
+        // 1. Matches one of our candidate names/slugs
+        // 2. Is a child of the currentParentId
+        const nextNode = await prisma.tag.findFirst({
+            where: {
+                parentId: currentParentId,
+                source: "SYSTEM",
+                OR: [
+                    { name: { in: Array.from(candidateTags), mode: 'insensitive' } },
+                    { slug: { in: Array.from(candidateTags), mode: 'insensitive' } }
+                ]
+            }
         });
 
-        if (filterKey && filters[filterKey]) {
-            const tagName = filters[filterKey];
-            const tag = await prisma.tag.findFirst({
-                where: { 
-                    group: group,
-                    source: "SYSTEM",
-                    OR: [
-                      { name: { equals: tagName, mode: 'insensitive' } },
-                      { slug: { equals: tagName, mode: 'insensitive' } }
-                    ]
-                }
-            });
+        if (nextNode) {
+            // Found a match! Advance the path.
+            currentParentId = nextNode.id;
+            currentLevelName = nextNode.name;
             
-            if (tag) {
-                currentParentId = tag.id;
-                currentLevelName = tag.name;
-                break; // Stop at deepest provided tag
+            // Remove the found tag from candidates to stop re-matching it
+            // We remove by Name AND Slug to be safe
+            candidateTags.delete(nextNode.name.toLowerCase());
+            candidateTags.delete(nextNode.slug.toLowerCase());
+            // Also need to remove identifying original input if it differed slightly? 
+            // The logic above used 'in' query, so we don't know exactly which input str matched.
+            // But since we are drilling down, picking the *first valid child* is correct behavior.
+            
+            // Optimization: We could filter the Set based on the match, but simpler to just loop.
+            // Since we don't know exact Key, we rely on the fact that the Tree Structure is unique enough.
+            // Wait, if we have duplicate names in params? (Unlikely).
+            
+            // Better removal logic:
+            // We matched `nextNode`. We should perform a fresh search in the next iteration.
+            // We need to ensure we don't match the SAME node again? 
+            // `parentId` changes, so we won't match the same node ID.
+            // But if we have "Grade 6" (Parent) and "Grade 6" (Child)... (Not valid hierarchy).
+            
+            // Actually, we must remove the matched candidate to allow finding *other* tags.
+            // But we can't easily map back to the input string found.
+            // Let's iterate the Set and remove the one that matches.
+             for (const c of candidateTags) {
+                if (c === nextNode.name.toLowerCase() || c === nextNode.slug.toLowerCase()) {
+                    candidateTags.delete(c);
+                }
             }
+        } else {
+            // No candidates match as a child of the current node.
+            // We have reached as deep as we can go with the provided filters.
+            break;
         }
     }
 
-    // 2. Fetch Children (Folders)
+    // 2. Fetch Children (Hierarchy Folders)
+    // 2. Fetch Children (Hierarchy Folders)
+    const childTagQuery: any = {
+        parentId: currentParentId,
+        source: "SYSTEM"
+    };
+
+    // FIX: If at Root (no parent), ONLY show LEVEL tags.
+    // This hides Attributes (Medium, Year) from appearing as Folders.
+    if (!currentParentId) {
+        childTagQuery.group = "LEVEL";
+    }
+
     const childTags = await prisma.tag.findMany({
-        where: {
-            parentId: currentParentId,
-            source: "SYSTEM"
-        },
+        where: childTagQuery,
         orderBy: { name: 'asc' }
     });
 
-    // 3. Fetch Files (Resources) (Only if we have a parent or are at root?)
-    // Usually only show files if we are inside a folder.
-    let resources: any[] = [];
+    // 3. Fetch Files (Resources) at this level
+    // Logic: Get ALL resources tagged with currentParentId.
+    
+    const childTagIds = new Set(childTags.map(t => t.id));
+    
+    const resourceQuery: any = {
+        source: "SYSTEM",
+        status: "APPROVED"
+    };
+
+    const andConditions: any[] = [];
+    
     if (currentParentId) {
-        // Optimization: Don't show files that belong to subfolders (children tags)
-        // This keeps the view clean (Drill-down style)
-        const childTagIds = childTags.map(t => t.id);
+        // Must belong to the current folder
+        andConditions.push({ tags: { some: { id: currentParentId } } });
+    }
+
+    // Apply Attribute Filters (Remaining Candidate Tags)
+    // Any tag name provided in filters that wasn't consumed by hierarchy traversal
+    if (candidateTags.size > 0) {
+        const remaining = Array.from(candidateTags);
+        log.info(`Applying Filter Attributes: ${remaining.join(", ")}`);
         
-        resources = await prisma.resource.findMany({
-            where: {
-                tags: { some: { id: currentParentId } },
-                // Exclude resources that are also tagged with any of the child tags
-                // This implies they are "inside" a subfolder
-                AND: childTagIds.length > 0 ? {
-                  NOT: {
-                    tags: { some: { id: { in: childTagIds } } }
-                  }
-                } : {},
-                source: "SYSTEM",
-                status: "APPROVED"
-            },
-            include: { tags: true },
-            take: 200
+        remaining.forEach(term => {
+            andConditions.push({
+                tags: { some: { 
+                    OR: [
+                        { name: { equals: term, mode: 'insensitive' } },
+                        { slug: { equals: term, mode: 'insensitive' } }
+                    ]
+                }}
+            });
         });
     }
 
-    // 4. Transform to Response Format
+    if (andConditions.length > 0) {
+        resourceQuery.AND = andConditions;
+    }
+
+    const resources = await prisma.resource.findMany({
+        where: resourceQuery,
+        include: { tags: true },
+        take: 500 // Limit for performance
+    });
+
+    // 4. Separate Loose Files vs Files in Subfolders
+    // And Collect Facets/Attributes from the loose files
+    const looseResources: ResourceWithTags[] = [];
+    const attributeCounts: Record<string, Record<string, number>> = {}; // Group -> TagName -> Count
+
+    for (const res of resources) {
+        // Is it inside a visible subfolder?
+        // (i.e. does it have a tag that matches one of our child folders?)
+        const isInsideSubfolder = childTags.length > 0 && res.tags.some((t: any) => childTagIds.has(t.id));
+
+        if (!isInsideSubfolder) {
+            looseResources.push(convertBigIntsToStrings(res) as ResourceWithTags);
+            
+            // Collect Attributes from THIS loose file for Facets
+            res.tags.forEach(tag => {
+                if (!tag.group) return;
+                // Ignore Hierarchy Groups (we are browsing them via folders)
+                if (["LEVEL", "STREAM", "GRADE", "SUBJECT", "LESSON"].includes(tag.group)) return;
+                
+                // It is an Attribute (Medium, ResourceType, etc)
+                if (!attributeCounts[tag.group]) attributeCounts[tag.group] = {};
+                if (!attributeCounts[tag.group][tag.name]) attributeCounts[tag.group][tag.name] = 0;
+                attributeCounts[tag.group][tag.name]++;
+            });
+        }
+    }
+
+    // 5. Transform Response
     const groupedFolders: Record<string, any[]> = {};
-    
     for (const tag of childTags) {
-        const group = tag.group || "Other";
+        const group = tag.group || "Navigation";
         if (!groupedFolders[group]) groupedFolders[group] = [];
         groupedFolders[group].push({
              id: tag.id,
@@ -274,38 +367,17 @@ class LibraryService {
              slug: tag.slug
         });
     }
-    
-    // Explicitly exclude resources that are effectively "Folders" in disguise?
-    // No, with parentId, only loose files are resources.
-    
-    // Filter logic: If a resource is also tagged with one of the *visible child tags*, 
-    // it probably belongs inside that folder. We should hide it from the "Loose Files" list 
-    // to avoid duplication (showing it as a file AND having it inside a folder).
-    // HOWEVER, `parentId` logic implies strict ownership. 
-    // We query `tags: { some: { id: currentParent } }`.
-    // This gets ALL files in this folder.
-    // DOES IT get files in subfolders? NO.
-    // Because files in subfolders are tagged with the Subfolder ID, NOT the Parent ID (usually).
-    // Wait. `processFolder` upserts resource with `currentContext.tagIds`.
-    // `tagIds` accumulates ALL IDs in the path.
-    // So a file deep down IS tagged with the top-level Subject.
-    // So searching `some: { id: ParentID }` WILL return deep files too.
-    // We need to filter out files that belong to any of the *Child Tags* we are about to show.
-    
-    const childTagIds = new Set(childTags.map(t => t.id));
-    const looseResources: ResourceWithTags[] = [];
-    
-    for (const res of resources) {
-        // If this resource is tagged with ANY of the immediate children, hide it.
-        const isInsideSubfolder = res.tags.some((t: any) => childTagIds.has(t.id));
-        if (!isInsideSubfolder) {
-            looseResources.push(convertBigIntsToStrings(res) as ResourceWithTags);
-        }
+
+    // Format facets
+    const facets: Record<string, any[]> = {};
+    for (const [group, counts] of Object.entries(attributeCounts)) {
+        facets[group] = Object.entries(counts).map(([name, count]) => ({ name, count }));
     }
 
     return {
         currentLevel: currentLevelName,
         folders: groupedFolders,
+        facets: facets, // <-- NEW: Available Attribute Tags for filtering
         resources: looseResources
     };
   }

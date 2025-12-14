@@ -5,6 +5,16 @@ import { log } from "../utils/logger";
 import { AppError } from "../utils/error";
 import { TagSource } from "@prisma/client";
 
+const TagSchema = t.Object({
+  id: t.String(),
+  name: t.String(),
+  slug: t.String(),
+  group: t.Optional(t.Nullable(t.String())),
+  source: t.Enum(TagSource),
+  parentId: t.Optional(t.Nullable(t.String())),  // Add ParentID explicit
+  // We omit createdAt/updatedAt/resources/children for the list view to stay light
+});
+
 export const tagController = new Elysia()
   /**
    * Get all tags with optional grouping
@@ -23,8 +33,15 @@ export const tagController = new Elysia()
       query: t.Object({
         source: t.Optional(t.Enum(TagSource)),
         group: t.Optional(t.String()),
-        search: t.Optional(t.String()), // Validate search param
+        search: t.Optional(t.String()),
       }),
+      response: {
+        200: t.Object({
+          success: t.Boolean(),
+          message: t.String(),
+          data: t.Array(TagSchema),
+        }),
+      },
       detail: {
         tags: ["Tag"],
       },
@@ -42,6 +59,13 @@ export const tagController = new Elysia()
       return successResponse(grouped, "Tags grouped successfully");
     },
     {
+      response: {
+        200: t.Object({
+          success: t.Boolean(),
+          message: t.String(),
+          data: t.Record(t.String(), t.Array(TagSchema)),
+        }),
+      },
       detail: {
         tags: ["Tag"],
       },

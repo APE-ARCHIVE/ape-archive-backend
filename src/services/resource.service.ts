@@ -10,6 +10,8 @@ interface GetResourcesQuery {
   limit?: number;
   search?: string;
   tagId?: string;
+  tagName?: string;
+  tagNames?: string;
   status?: ResourceStatus;
 }
 
@@ -33,12 +35,42 @@ export const resourceService = {
       ];
     }
 
+    const andConditions: Prisma.ResourceWhereInput[] = [];
+
+    // Filter by Tag ID
     if (query.tagId) {
-      where.tags = {
-        some: {
-          id: query.tagId,
-        },
-      };
+      andConditions.push({
+        tags: { some: { id: query.tagId } }
+      });
+    }
+
+    // Filter by Single Tag Name
+    if (query.tagName) {
+       andConditions.push({
+        tags: {
+          some: {
+            name: { equals: query.tagName, mode: "insensitive" }
+          }
+        }
+       });
+    }
+
+    // Filter by Multiple Tag Names (comma separated)
+    if (query.tagNames) {
+      const names = query.tagNames.split(",").map(n => n.trim()).filter(n => n.length > 0);
+      names.forEach(name => {
+        andConditions.push({
+          tags: {
+            some: {
+              name: { equals: name, mode: "insensitive" }
+            }
+          }
+        });
+      });
+    }
+
+    if (andConditions.length > 0) {
+      where.AND = andConditions;
     }
 
     const [resources, total] = await Promise.all([

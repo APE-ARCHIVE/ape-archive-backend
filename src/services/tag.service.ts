@@ -70,15 +70,25 @@ class TagService {
    */
   async getTagsGrouped(source?: TagSource): Promise<GroupedTags> {
     try {
-      const where = source ? { source } : {};
+      const where: any = source ? { source } : {};
+      // Exclude LESSON tags from grouped view (too many, use hierarchy instead)
+      where.group = { not: "LESSON" };
+
       const tags = await prisma.tag.findMany({
         where,
         orderBy: [{ group: "asc" }, { name: "asc" }],
       });
 
       const grouped: GroupedTags = {};
+      const seen = new Set<string>(); // composite key: "group:name"
+
       for (const tag of tags) {
         const groupName = tag.group || "Other";
+        const compositeKey = `${groupName}:${tag.name.toLowerCase()}`; // Case insensitive dedup
+
+        if (seen.has(compositeKey)) continue;
+        seen.add(compositeKey);
+
         if (!grouped[groupName]) {
           grouped[groupName] = [];
         }
@@ -100,7 +110,7 @@ class TagService {
   /**
    * Get or create a tag (creates as USER source by default)
    */
-  async getOrCreateTag(name: string, group?: string): Promise<any> {
+  async getOrCreateTag(name: string, group?: string, parentId?: string | null): Promise<any> {
     try {
       const cleanName = name.trim();
       const slug = cleanName
@@ -109,9 +119,12 @@ class TagService {
         .replace(/\s+/g, "-")
         .replace(/[^\w-]/g, "");
 
-      // Check if tag exists
+      // Check if tag exists (Context Aware)
       const existing = await prisma.tag.findFirst({
-        where: { name: cleanName },
+        where: { 
+            name: cleanName,
+            parentId: parentId !== undefined ? parentId : undefined // Only filter by parent if provided
+        },
       });
 
       if (existing) {
@@ -124,6 +137,7 @@ class TagService {
           name: cleanName,
           slug: slug,
           group: group || null,
+          parentId: parentId || null,
           source: "USER", // User-created tags
         },
       });
